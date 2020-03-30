@@ -1,4 +1,5 @@
 import RIS_Tools as db2
+import setup_clion_folder as suf
 from tqdm import tqdm
 import params
 import os
@@ -9,6 +10,8 @@ from collections import defaultdict
 from datetime import datetime
 import getpass
 
+# ***TODO***
+# mft for the intersection of 2 rb streets is problematic ec. 63 st and queens blvd
 #
 # This is the refactor of CLION intended to simplify the workflow.
 #
@@ -91,6 +94,42 @@ def archive(dbo, lion=params.LION, node=params.NODE, schema=params.WORKING_SCHEM
                            u=getpass.getuser(), d=datetime.now().strftime('%Y-%m-%d %H:%M')))
 
 
+def import_districts(dbo, schema=params.WORKING_SCHEMA, folder=params.FOLDER):
+    """
+    Use DCP files NOT clipped to shoreline - USE water included to avoid problems with bridges 
+     
+    Sources: 
+        https://www1.nyc.gov/site/planning/data-maps/open-data/districts-download-metadata.page
+        https://www1.nyc.gov/site/planning/data-maps/open-data/dwn-nynta.page
+    :param dbo: 
+    :param schema: 
+    :param folder: 
+    :return: 
+    """
+    # districts:
+    #     community districts - included in lion (l_cd, r_cd)
+    #     police precincts - nypp (this is only available clipped to shoreline)
+    #     borough - included in lion (lboro, rboro)
+    #     city council districts - nycc
+    #     state assembly districts - included in lion (LAssmDist, RAssmDist)
+    #     state senate districts - nyss
+    #     NTA - nynta
+    # ------------------------------------------------------------------------
+    # import districts
+    for shp in ('nyccwi', 'nysswi', 'nynta', 'nypp'):
+        shapefile = os.path.join(folder, '%s.shp' % shp)
+        dbo.query('DROP TABLE IF EXISTS {}.{}'.format(schema, shp.replace('wi', '')))
+        db2.import_shp_to_pg(shapefile, dbo, schema, perc=True)
+        if shapefile != shp:
+            dbo.query('ALTER TABLE {}."{}" RENAME TO {}'.format(schema, shapefile.lower()[:-4], shp.replace('wi', '')))
+            dbo.query('ALTER TABLE {}."{}" RENAME wkb_geometry  TO {}'.format(schema, shp.replace('wi', ''), 'geom'))
+            if shp == 'nypp':
+                dbo.query("""update {}."{}" set geom = st_multi(st_collectionextract(st_makevalid(geom),3)) 
+                    where st_isvalid(geom) = false;""".format(schema, shp.replace('wi', '')))
+        print 'Imported {}'.format(os.path.join(folder, shp))
+
+
+
 @db2.timeDec
 def setup_database(dbo, lion=params.LION, node=params.NODE, version=params.VERSION, rpl=params.RPL_TXT,
                    schema=params.WORKING_SCHEMA, folder=params.FOLDER):
@@ -99,16 +138,24 @@ def setup_database(dbo, lion=params.LION, node=params.NODE, version=params.VERSI
     for table in tables:
         dbo.query("DROP TABLE IF EXISTS {s}.{t} CASCADE;".format(s=schema, t=table))
     # import lion shapefiles
-    for shp in [('lion.shp', params.LION), ('node.shp', params.NODE)]:
-        shapefile = os.path.join(params.FOLDER, shp[0])
+    folder = folder + '/DATA'
+    for shp in [('lion.shp', lion), ('node.shp', node)]:
+    # for feat in [lion, node]:
+        shapefile = os.path.join(folder, shp[0])
         db2.import_shp_to_pg(shapefile, dbo, schema)
+        # db2.import_from_gdb(os.path.join(folder, 'RAW_DATA\lion\lion.gdb'),
+        #                     feat, dbo, schema)
         # rename if needed
         if shapefile != shp[1]:
             dbo.query('ALTER TABLE {}."{}" RENAME TO {}'.format(schema, shapefile.lower()[:-4], shp[1]))
             dbo.query('ALTER TABLE {}."{}" RENAME wkb_geometry  TO {}'.format(
                 schema, shp[1], 'geom')
             )
-        print 'Imported {}'.format(os.path.join(params.FOLDER, shp[0]))
+        print 'Imported {}'.format(os.path.join(folder, shp[0]))
+    # import altnames
+    print 'importing altnames...'
+    db2.import_dbf_to_pg(os.path.join(folder, 'altnames.dbf'), dbo, 'public')
+    print 'Imported altnames'
     # fix node geom field (GDAL imports as MultiPoint
     # Revised process for PostGIS 2.X +
     dbo.query("""
@@ -125,20 +172,26 @@ def setup_database(dbo, lion=params.LION, node=params.NODE, version=params.VERSI
     #         """.format(s=schema, t=node))
     # add RPL table
     RPLi.run(dbo, folder, rpl)
+    # add districts
+    import_districts(dbo, schema=schema, folder=folder)
+
     # add version
-    add_version(dbo, schema, lion, node, version, rpl)
+    add_version(dbo, schema, version, [lion, node, 'tbl_'+rpl[:-4], 'nycc', 'nyss', 'nynta', 'nypp'])
     # add master id columns
     add_clion_columns(dbo, schema, lion, node)
+    # add districts
+    add_districts(dbo, schema, lion)
 
 
-def add_version(dbo, schema=params.WORKING_SCHEMA, lion=params.LION, node=params.NODE,
-                version=params.VERSION, rpl=params.RPL_TXT):
+def add_version(dbo, schema=params.WORKING_SCHEMA, version=params.VERSION,
+                tables=[params.LION, params.NODE, 'tbl_'+params.RPL_TXT[:-4]]):
     # update lion, node and rpl with version number
-    tables = [lion, node, 'tbl_'+rpl[:-4]]
+    # tables = [lion, node, 'tbl_'+rpl[:-4]]
     for table in tables:
         print 'Updating {}...'.format(table)
         dbo.query("ALTER TABLE {s}.{t} ADD version varchar(5)".format(s=schema, t=table))
-        dbo.query("ALTER TABLE {s}.{t} ADD created timestamp".format(s=schema, t=table))
+        dbo.query("ALTER TABLE {s}.{t} ADD created TIMESTAMP; SET timezone = 'America/New_York';".format(
+            s=schema, t=table))
         dbo.query("UPDATE {s}.{t} set version = '{v}', created = now()".format(s=schema, t=table, v=version))
 
 
@@ -150,7 +203,16 @@ def add_clion_columns(dbo, schema=params.WORKING_SCHEMA, lion=params.LION, node=
                  add column masteridto int, 
                  add column exclude bool default True, 
                  add column manual_fix bool default False,
-                 add column ramp bool default False
+                 add column ramp bool default False,
+                 
+                 add column lcoundist int,
+                 add column rcoundist int,
+                 add column lstsendist int,
+                 add column rstsendist int,
+                 add column lntacode varchar(10),
+                 add column rntacode varchar(10),
+                 add column lprecinct int,
+                 add column rprecinct int
                  """.format(
         schema, lion))
     dbo.query("""alter table {0}.{1} 
@@ -158,18 +220,103 @@ def add_clion_columns(dbo, schema=params.WORKING_SCHEMA, lion=params.LION, node=
                  add column is_int bool default False,
                  add column manual_fix bool default False
                 """.format(schema, node))
+
+
+@db2.timeDec
+def add_districts(dbo, schema=params.WORKING_SCHEMA, lion=params.LION):
+    print 'Adding Districts...'
+    # update city council districts
+    dbo.query("""
+       drop table if exists buf;
+        create table {s}.buf as select coundist, st_buffer(geom, 10) as geom from {s}.nycc;
+        CREATE INDEX temp_buf_idx ON {s}.buf USING gist (geom); 
+        
+        update {s}.{l} as l
+        set lcoundist = coundist, rcoundist = coundist
+        from {s}.buf p
+        where st_within(l.geom, p.geom);
+        
+        update {s}.{l} as l
+        set rcoundist = coundist
+        from {s}.buf p
+        where lcoundist != coundist and st_within(l.geom, p.geom);
+        
+        drop table if exists {s}.buf;
+    """.format(s=schema, l=lion))
+    print 'City Council districts added'
+    # update nta districts
+    dbo.query("""
+           drop table if exists buf;
+            create table {s}.buf as select ntacode, st_buffer(geom, 10) as geom from {s}.nynta;
+            CREATE INDEX temp_buf_idx ON {s}.buf USING gist (geom); 
+
+            update {s}.{l} as l
+            set lntacode = ntacode, rntacode = ntacode
+            from {s}.buf p
+            where st_within(l.geom, p.geom);
+
+            update {s}.{l} as l
+            set rntacode = ntacode
+            from {s}.buf p
+            where lntacode != ntacode and st_within(l.geom, p.geom);
+
+            drop table if exists {s}.buf;
+        """.format(s=schema, l=lion))
+    print 'NTAs added'
+    # update police precincts
+    # added st_makevalid because there was an issue with 61st PCT
+    # pct boundaries are not cleanly drawn so larger buffer is needed
+    dbo.query("""
+              drop table if exists buf;
+               create table {s}.buf as select precinct, st_buffer(st_makevalid(geom), 25) as geom from {s}.nypp;
+               CREATE INDEX temp_buf_idx ON {s}.buf USING gist (geom); 
+
+               update {s}.{l} as l
+               set lprecinct = precinct, rprecinct = precinct
+               from {s}.buf p
+               where st_within(l.geom, p.geom);
+
+               update {s}.{l} as l
+               set rprecinct = precinct
+               from {s}.buf p
+               where lprecinct != precinct and st_within(l.geom, p.geom);
+
+               drop table if exists {s}.buf;
+           """.format(s=schema, l=lion))
+    print 'Police Precincts added'
+
+    # update state senate districts
+    dbo.query("""
+                  drop table if exists buf;
+                   create table {s}.buf as select stsendist, st_buffer(geom, 10) as geom from {s}.nyss;
+                   CREATE INDEX temp_buf_idx ON {s}.buf USING gist (geom); 
+
+                   update {s}.{l} as l
+                   set lstsendist = stsendist, rstsendist = stsendist
+                   from {s}.buf p
+                   where st_within(l.geom, p.geom);
+
+                   update {s}.{l} as l
+                   set rstsendist = stsendist
+                   from {s}.buf p
+                   where lstsendist != stsendist and st_within(l.geom, p.geom);
+
+                   drop table if exists {s}.buf;
+               """.format(s=schema, l=lion))
+    print 'State Senate districts added'
+
 # |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 # Step 2: Define street network to use (centerline)
 # |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 
 
-def manual_fix_segments(dbo, to_fix, schema=params.WORKING_SCHEMA, lion=params.LION):
+def manual_fixes(dbo, to_fix):
     # to_dos = [(where field, where value, update field, update value)]
     for row in to_fix:
-        wf, wv, uf, uv = row
+        wf, wv, uf, uv, tbl = row
         print 'Updating {s} field {f} to {v}'.format(f=row[1], v=row[2], s=row[0])
-        dbo.query("update {sch}.{l} set {u_f} = {u_v}, manual_fix = True where {w_f} = {w_v}".format(
-            sch=schema, l=lion, u_f=uf, u_v=uv, w_f=wf, w_v=wv
+        dbo.query("update {t} set {u_f} = {u_v}, manual_fix = True where {w_f} = {w_v}".format(
+            t=tbl, u_f=uf, u_v=uv, w_f=wf, w_v=wv
         ))
         dbo.conn.commit()
 
@@ -183,6 +330,7 @@ def define_usable_street_network(dbo, schema=params.WORKING_SCHEMA, lion=params.
                 and (nonped = 'D' or nonped is null)
                 and trafdir != 'P' and rw_type!='7' -- take out ped streets (not including step streets)
                 and street != 'UNNAMED STREET' 
+                and rw_type!='8' -- driveway 
                 and street != 'DRIVEWAY' 
                 and street not like '%{po1}%' and street not like '%{po2}%'  and street not like '%{po3}%'
                 """.format(s=schema, t=lion, po1='PED OVPS', po2='PEDESTRIAN OVERPASS', po3='PEDESTRIAN UNDERPASS'))
@@ -217,12 +365,11 @@ def build_generic_node_levels(dbo, schema, node_table, lion_table, rpl_table):
     # this is only used for ramps (some road have split levels where we want to keep as intersection),
     # but ramps passing over a street at a different level should be excluded
 
+    # make levels_lookup_table
     dbo.query("""
-                drop table if exists {s}.rb_to_generic_node_levels;
-                create table {s}.rb_to_generic_node_levels as
-                
-                select nodeid, count(*) as levels--, geom
-                from (
+                    drop table if exists {s}.rb_to_generic_node_levels_lookup;
+                    create table {s}.rb_to_generic_node_levels_lookup as
+
                     select distinct n.nodeid, l.nodelevelt--, n.geom
                     from {s}.{n} as n
                     -- join node to rpl on g nodes (to)
@@ -234,7 +381,7 @@ def build_generic_node_levels(dbo, schema, node_table, lion_table, rpl_table):
                     and l.rb_layer !='G'
                     --------------------------------------------------------------------------------------------------
                     union 
-                    
+
                     select distinct n.nodeid, l.nodelevelf--, n.geom
                     from {s}.{n} as n
                     -- join node to rpl on g nodes (to)
@@ -245,25 +392,54 @@ def build_generic_node_levels(dbo, schema, node_table, lion_table, rpl_table):
                     ------------------------------------fails for ints with ramps and devided rds without other x-street
                     and l.rb_layer !='G'
                     --------------------------------------------------------------------------------------------------
-                ) as nl group by nodeid--, geom;
-            """.format(s=schema, n=node_table, l=lion_table, r=rpl_table))
+
+                    union ---------------------------------ADD IN SEGMENTS IN BOTH -----------------------------------
+
+                    select nodeidfrom::int as nodeid, nodelevelf
+                    from {s}.{l} 
+                    where rb_layer = 'B'
+                    and featuretyp in ('0', '6', 'C') 
+                    union 
+                    select nodeidto::int as nodeid, nodelevelt
+                    from {s}.{l} 
+                    where rb_layer = 'B'
+                    and featuretyp in ('0', '6', 'C') 
+                """.format(s=schema, n=node_table, l=lion_table, r=rpl_table))
+
+    dbo.query("""
+                    drop table if exists {s}.rb_to_generic_node_levels;
+                    create table {s}.rb_to_generic_node_levels as
+
+                    select nodeid, count(*) as levels--, geom
+                    from {s}.rb_to_generic_node_levels_lookup group by nodeid
+
+                """.format(s=schema, n=node_table, l=lion_table, r=rpl_table))
+
+    # generate node levels for undivided streets
+    dbo.query("""
+                   drop table if exists {s}.generic_node_levels_lookup;
+
+                   create table {s}.generic_node_levels_lookup as
+                       select nodeidfrom::int as nodeid, nodelevelf
+                       from {s}.{l} l
+                       left outer join {s}.rb_to_generic_node_levels as nl on nl.nodeid = l.nodeidfrom::int
+                       where l.featuretyp in ('0', '6', 'C') and nl.nodeid is null
+                       union
+                       select nodeidto::int as nodeid, nodelevelt
+                       from {s}.{l} l
+                       left outer join {s}.rb_to_generic_node_levels as nl on nl.nodeid = l.nodeidto::int
+                       where l.featuretyp in ('0', '6', 'C') and nl.nodeid is null
+                  """.format(s=schema, l=lion_table, r=rpl_table))
+
+    # generate node levels for undivided streets
     dbo.query("""
                 drop table if exists {s}.generic_node_levels;
 
                 create table {s}.generic_node_levels as
                 
                 select nodeid, count(*) as levels--, geom
-                from (
-                    select nodeidfrom::int as nodeid, nodelevelf
-                    from {s}.{l} l
-                    left outer join {s}.rb_to_generic_node_levels as nl on nl.nodeid = l.nodeidfrom::int
-                    where l.featuretyp in ('0', '6', 'C') and nl.nodeid is null
-                    union
-                    select nodeidto::int as nodeid, nodelevelt
-                    from {s}.{l} l
-                    left outer join {s}.rb_to_generic_node_levels as nl on nl.nodeid = l.nodeidto::int
-                    where l.featuretyp in ('0', '6', 'C') and nl.nodeid is null
-                ) as gnl group by nodeid;
+                from {s}.generic_node_levels_lookup group by nodeid;
+               
                """.format(s=schema, l=lion_table, r=rpl_table))
     dbo.query("""
                     drop table if exists {s}.node_levels;
@@ -295,7 +471,7 @@ def build_street_name_table(dbo, schema=params.WORKING_SCHEMA, lion=params.LION,
                 create table {0}.node_stnameFT as (
                     select left(node, length(node)-1)::int as node, -- remove nodelevel from nodeid
                     /*case when ramp = True then 'Ramp' else street end as*/--removed because it was over clusering
-                     street, ramp, 0 as master
+                     street, ramp, 0 as master, right(node, 1) as level
                     from (
                         select nodeidfrom||nodelevelf as node, street, ramp
                         from {0}.{1} where exclude = False or ramp = True
@@ -323,19 +499,58 @@ def build_street_name_table(dbo, schema=params.WORKING_SCHEMA, lion=params.LION,
     # update where ramp intersects with a a street
     dbo.query("""
     -- standard
-    update {s}.node set is_int = True
+    update {s}.{n} n set is_int = True
     from (
         select street.* 
-        from (select distinct node, street from {s}.node_stnameFT where ramp = False) street
-        join (select distinct node, 'ramp' from {s}.node_stnameFT where ramp = True) ramp
-        on street.node = ramp.node
+        from (select distinct node, street, level from {s}.node_stnameFT where ramp = False) street
+        join (select distinct node, street, level from {s}.node_stnameFT where ramp = True) ramp
+        on street.node = ramp.node and street.street != ramp.street and street.level = ramp.level
         /*left outer*/ join {s}.node_levels as levels 
         on street.node = levels.nodeid
         where levels.levels = 1 --or levels.levels is null
     ) as i
-    where node.nodeid = i.node;
-    """.format(s=schema))
+    where n.nodeid = i.node;
+    """.format(s=schema, n=node))
     define_double_segments(dbo, schema, lion, node)
+
+    # additional ramp intersection process to overcome locations with ramps at multi-roadbed locations
+    # this was failing for for ints with ramps and divided rds without other x-street
+    dbo.query(
+        """
+        update {s}.{n} n set is_int = True
+        from (
+            select distinct n.*
+            from {s}.{n} n
+            -- ramps with faux segments 
+            join (select * from {s}.{l} where segmenttyp = 'F' and ramp = True) f 
+            on n.nodeid = f.nodeidfrom::int 
+            -- intersects regular streets generic streets 
+            join (select * from {s}.{l} where rb_layer = 'G' and exclude = False) s 
+            on n.nodeid = s.nodeidfrom::int 
+            
+            -- check z axis 
+            join {s}.node_levels as levels 
+            on n.nodeid = levels.nodeid
+            where levels.levels = 1  
+            union 
+            select distinct n.*
+            from {s}.{n} n
+            join (select * from {s}.{l} where segmenttyp = 'F' and ramp = True) f 
+            on n.nodeid = f.nodeidto::int 
+            join (select * from {s}.{l} where rb_layer = 'G' and exclude = False) s 
+            on n.nodeid = s.nodeidto::int 
+            
+            -- check z axis
+            join {s}.node_levels as levels 
+            on n.nodeid = levels.nodeid
+            where n.is_int = False 
+            
+            and levels.levels = 1  
+        ) as ri
+        where n.nodeid = ri.nodeid 
+        """.format(s=schema, n=node, l=lion)
+    )
+
 # |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 # Step 5: Build simplified network
 # |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
@@ -388,6 +603,7 @@ def define_double_segments(dbo, schema=params.WORKING_SCHEMA, lion=params.LION, 
 
 @db2.timeDec
 def node_names(dbo, node_street_names, node_is_intersection, schema=params.WORKING_SCHEMA, node=params.NODE):
+    # TODO: Need to create an exclusion list - ex. concourse village east/west
     def de_suffix(name):
         # remove some precision in street names to create better sets
         d = {' WEST': ' DIR',
@@ -553,6 +769,39 @@ def generate_blocks_from_masterids(dbo,
                        where l.segmentid =t.seg""".format(schema, lion))
     dbo.query("drop table {}.tempmaster".format(schema))
     return alt_graph
+
+
+@db2.timeDec
+def update_blocks_limit_to_1_street_name(dbo,
+                                         lion=params.LION,
+                                         schema=params.WORKING_SCHEMA):
+    # find all blocks with more than 1 street name
+    unique_names_mfts = dbo.query("""
+        select t.* from (
+            select mft, street, rank() over (partition by street, mft order by segmentid ) strts 
+            from {0}.{1} where  mft is not null
+        ) t 
+        join (
+            select mft, count(distinct street) cnt
+            from {0}.{1}
+            where  mft is not null
+            group by mft having count(distinct street) > 1
+        ) problem_mfts
+        on t.mft=problem_mfts.mft 
+        where strts = 1
+    """.format(schema, lion))
+    # get max mft
+    max_mft = dbo.query("select max(mft) from {0}.{1}".format(schema, lion))
+    max_mft = max_mft.data[0][0]
+    # get unique street names
+    for row in tqdm(unique_names_mfts.data):
+        mft, street_name, _ = row
+        max_mft += 1
+        # update mft to split on street name
+        dbo.query("update {s}.{l} set mft = {new_m} where street='{st}' and mft={old_m}".format(
+            s=schema, l=lion, new_m=max_mft, st=street_name, old_m=mft
+        ))
+    print '\nSplit mfts on name'
 
 
 def street_name_key(street_set):
@@ -881,17 +1130,17 @@ def remap_from_to_masters(dbo, lion_table, node_table, schema):
     # update the to nodes for simple streets
 
     # make the min master as from and the max master as to
-    dbo.query("""drop table if exists {0}.tempFrom; 
+    dbo.query("""drop table if exists {0}.tempFrom;
                 create table {0}.tempFrom as (
                     select p1.mft, mn, mx from (
                         select mft, min(masterid) as mn from (
-                            select mft, masterid 
+                            select mft, masterid
                             from {0}.{1} as l
                             join {0}.{2} as n
                             on nodeidfrom::int = nodeid
                             where mft is not null and masterid is not null
                         union
-                            select mft, masterid 
+                            select mft, masterid
                             from {0}.{1} as l
                             join {0}.{2} as n
                             on nodeidto::int = nodeid
@@ -899,13 +1148,13 @@ def remap_from_to_masters(dbo, lion_table, node_table, schema):
                         ) as mn group by mft
                     ) as p1 join (
                         select mft, max(masterid) as mx from (
-                            select mft, masterid 
+                            select mft, masterid
                             from {0}.{1} as l
                             join {0}.{2} as n
                             on nodeidfrom::int = nodeid
                             where mft is not null and masterid is not null
                         union
-                            select mft, masterid 
+                            select mft, masterid
                             from {0}.{1} as l
                             join {0}.{2} as n
                             on nodeidto::int = nodeid
@@ -913,33 +1162,145 @@ def remap_from_to_masters(dbo, lion_table, node_table, schema):
                         ) as mx group by mft
                     ) as p2 on p1.mft = p2.mft
                 );""".format(schema, lion_table, node_table))
+
+    #############################################################################################
+    ############################# CHANGE HERE 3/10/20 ###########################################
+    ############################# NOT SURE WHY THIS WAS ADDED ###################################
+    #############################################################################################
+    # dbo.query("""drop table if exists {0}.tempFrom;
+    #                create table {0}.tempFrom as (
+    #                   select p1.mft, mn, mx
+    #                 from (
+    #                     select distinct mft, masterid as mn
+    #                     from {0}.{1} as l
+    #                     join {0}.{2} as n
+    #                     on nodeidfrom::int = nodeid
+    #                     where mft is not null and masterid is not null
+    #                 ) as p1
+    #                 join (
+    #                     select distinct mft, masterid as mx
+    #                     from {0}.{1} as l
+    #                     join {0}.{2} as n
+    #                     on nodeidto::int = nodeid
+    #                     where mft is not null and masterid is not null
+    #                 ) as p2 on p1.mft=p2.mft
+    #                );""".format(schema, lion_table, node_table))
+    #############################################################################################
+
+    # dbo.query("""update {s}.{l} as l
+    #                     set masteridfrom = masterid
+    #                     from {s}.{n} n
+    #                     where l.nodeidfrom::int = n.nodeid
+    #                     and mft is not null;
+    #             update {s}.{l} as l
+    #                     set masteridto = masterid
+    #                     from {s}.{n} n
+    #                     where l.nodeidto::int = n.nodeid
+    #                     and mft is not null;
+    #             """.format(s=schema, l=lion_table, n=node_table))
     # update lion with mfrom and to values
     dbo.query("""update {s}.{l}  as l
                     set masteridfrom = mn, masteridto= mx
                     from {s}.tempFrom
-                    where l.mft = tempFrom.mft 
+                    where l.mft = tempFrom.mft
             """.format(s=schema, l=lion_table))
     dbo.query("drop table {0}.tempFrom".format(schema))
-    stabilize_mfts(dbo, lion_table, schema)
+    fix_dead_ends(dbo, lion_table, node_table, schema)
     remap_blocks(dbo, lion_table, node_table, schema)
 
+    update_blocks_limit_to_1_street_name(dbo, lion_table, schema)
+    stabilize_mfts(dbo, lion_table, schema)
 
+@db2.timeDec
+def fix_dead_ends(dbo, lion_table, node_table, schema):
+    dbo.query("""
+    update {s}.{l}  as l
+    set masteridfrom = n.masterid
+    from {s}.{n} n
+    where l.nodeidfrom::int=n.masterid
+    and l.masteridfrom is null
+    and l.exclude=False;
+    """.format(s=schema, l=lion_table, n=node_table))
+    dbo.query("""
+    update {s}.{l}  as l
+    set masteridto = n.masterid
+    from {s}.{n} n
+    where l.nodeidto::int=n.masterid
+    and l.masteridto is null
+    and l.exclude=False;
+    """.format(s=schema, l=lion_table, n=node_table))
+
+    dbo.query("""
+    drop table if exists {s}.tempFrM;
+    create table {s}.tempFrM as 
+    select l.segmentid, n.masteridfrom 
+    from {s}.{l} l
+    join (select mft, masteridfrom from {s}.{l} where masteridfrom is not null) n
+    on l.mft=n.mft and l.masteridfrom is null
+    and l.exclude=False;
+    
+    update {s}.{l} l
+    set masteridfrom = n.masteridfrom 
+    from {s}.tempFrM n
+    where l.segmentid = n.segmentid;
+
+    """.format(s=schema, l=lion_table, n=node_table))
+    dbo.query("""
+    drop table if exists {s}.tempFrM;
+    create table {s}.tempFrM as 
+    select l.segmentid, n.masteridto
+    from {s}.{l} l
+    join (select mft, masteridto from {s}.{l} where masteridfrom is not null) n
+    on l.mft=n.mft and l.masteridto is null
+    and l.exclude=False;
+    
+    update {s}.{l} l
+    set masteridto = n.masteridto 
+    from {s}.tempFrM n
+    where l.segmentid = n.segmentid;
+
+    drop table if exists {s}.tempFrM;
+    """.format(s=schema, l=lion_table, n=node_table))
+
+
+############################################################################################
+#################### CHANGED MAR 2020 FROM MASTER FROM/TO TO MFT ###########################
+############################################################################################
+# @db2.timeDec
+# def stabilize_mfts(dbo, lion_table, schema):
+#     dbo.query("alter table {s}.{n} add newid int;".format(s=schema, n=lion_table))
+#     dbo.query("""drop table if exists {s}.new_mft;
+#                 create table {s}.new_mft as
+#                 select masteridfrom, masteridto, max(segmentid ) as newid
+#                 from {s}.{n}
+#                 where (masteridfrom is not null or masteridto is not null)
+#                 and exclude = False
+#                 group by masteridfrom, masteridto
+#                 """.format(s=schema, n=lion_table))
+#     dbo.query("""
+#                 update {s}.{n} as n
+#                 set newid = nm.newid::int
+#                 from {s}.new_mft as nm
+#                 where COALESCE(n.masteridfrom, 0) = COALESCE(nm.masteridfrom,0) and
+#                 COALESCE(n.masteridto,0) = COALESCE(nm.masteridto,0);""".format(s=schema, n=lion_table))
+#     dbo.query("update {s}.{n} set mft = newid;".format(s=schema, n=lion_table))
+#     dbo.query("alter table {s}.{n} drop column newid;".format(s=schema, n=lion_table))
+#     dbo.query("drop table if exists {s}.new_mft;".format(s=schema))
 @db2.timeDec
 def stabilize_mfts(dbo, lion_table, schema):
     dbo.query("alter table {s}.{n} add newid int;".format(s=schema, n=lion_table))
     dbo.query("""drop table if exists {s}.new_mft;
                 create table {s}.new_mft as
-                select masteridfrom, masteridto, max(segmentid ) as newid
+                select mft, max(segmentid ) as newid
                 from {s}.{n}
-                where masteridfrom is not null and masteridto is not null
-                group by masteridfrom, masteridto
+                where exclude = False
+                group by mft
                 """.format(s=schema, n=lion_table))
     dbo.query("""
                 update {s}.{n} as n
                 set newid = nm.newid::int
                 from {s}.new_mft as nm
-                where n.masteridfrom = nm.masteridfrom and 
-                n.masteridto = nm.masteridto;""".format(s=schema, n=lion_table))
+                where n.mft=nm.mft;""".format(s=schema, n=lion_table))
     dbo.query("update {s}.{n} set mft = newid;".format(s=schema, n=lion_table))
     dbo.query("alter table {s}.{n} drop column newid;".format(s=schema, n=lion_table))
     dbo.query("drop table if exists {s}.new_mft;".format(s=schema))
@@ -952,10 +1313,12 @@ def remap_blocks(dbo, lion_table, node_table, schema):
         select mft, n.masterid 
         from {s}.{l} l join {s}.{n} n on l.nodeidfrom::int=n.nodeid 
         where masterid is not null
+        and l.exclude = False
         union 
         select mft, n.masterid 
         from {s}.{l} l join {s}.{n} n on l.nodeidto::int=n.nodeid 
-        where masterid is not null;""".format(l=lion_table, n=node_table, s=schema))
+        where masterid is not null
+        and l.exclude = False;""".format(l=lion_table, n=node_table, s=schema))
     dbo.query("""delete from {s}.temp_masters where mft in (
                 select mft from {s}.temp_masters group by mft having count(*) <3
             )""".format(s=schema))  # -------- only fix forks where there is an issue (was removing needed masters)
@@ -1005,6 +1368,7 @@ def update_roadbeds(dbo, schema, lion_table, tbl_rpl):
                 set mft = r.mft, masteridfrom = r.masteridfrom, masteridto=r.masteridto
                 from rb_mft as r
                 where l.segmentid::int = r.segmentidr
+                and r.mft is not null and l.exclude = False
             """.format(s=schema, l=lion_table))
 
 
@@ -1244,6 +1608,7 @@ def add_corridor_to_lion(dbo):
 
 @db2.timeDec
 def make_master_node_lookup(dbo, schema, node_table, version):
+    print 'Creating lookup tables'
     # This creates a lookup table for display coordinates for nodes
     dbo.query("""
                 drop table if exists {s}.temp_best_node;
@@ -1292,6 +1657,13 @@ def make_master_node_lookup(dbo, schema, node_table, version):
                 grant all on {s}.master_node_geo_lookup to public;
            """.format(s=schema, n=node_table))
     dbo.query("""
+        alter table {s}.master_node_geo_lookup add column st_x decimal, add column st_y decimal, add column wkt text;
+        update {s}.master_node_geo_lookup 
+            set wkt=st_astext(geom),
+            st_x = st_x(ST_Centroid(geom)),
+            st_y = st_y(ST_Centroid(geom));
+    """.format(s=schema))
+    dbo.query("""
                 Comment on table {s}.master_node_geo_lookup is 
                 'CLION display coordinates for nodes with masterids (Version {v} - Run: {d}'
             """.format(s=schema, v=version, d=datetime.now().strftime('%Y-%m-%d')))
@@ -1338,6 +1710,17 @@ def make_master_segment_lookup(dbo, schema, lion_table, version):
                 grant all on {s}.master_seg_geo_lookup to public;
             """.format(s=schema, l=lion_table))
     dbo.query("""
+        alter table {s}.master_seg_geo_lookup add column st_x decimal, add column st_y decimal, add column wkt text;
+        
+        update {s}.master_seg_geo_lookup 
+            set wkt=st_astext(geom),
+            --st_x = st_x(ST_Centroid(geom)),
+            st_x = st_x(ST_ClosestPoint(geom, ST_Centroid(geom))),
+            --st_y = st_y(ST_Centroid(geom))
+            st_y = st_y(ST_ClosestPoint(geom, ST_Centroid(geom)));
+    """.format(s=schema))
+
+    dbo.query("""
                 Comment on table {s}.master_seg_geo_lookup is 
                 'CLION display coordinates for segments with mfts (Version {v} - Run: {d}'
             """.format(s=schema, v=version, d=datetime.now().strftime('%Y-%m-%d')))
@@ -1347,21 +1730,41 @@ def make_master_segment_lookup(dbo, schema, lion_table, version):
 
 
 def street_name_view(dbo, schema, lion_table):
+    print 'Creating street name view'
     dbo.query("""
                 drop view if exists {s}.v_street_names;
-                create view {s}.v_street_names as
-                select node, min(street) as s1, max(street) as s2, array_agg(street) as als
-                from (
-                    select nodeidfrom::int as node, street
-                    from {s}.{l}
-                    union
-                    select nodeidto::int as node, street
-                    from {s}.{l}
-                ) as d group by node;
+                CREATE VIEW public.v_street_names
+                 AS
+                 SELECT all_boros.node,
+                    all_boros.s1,
+                    all_boros.s2,
+                    all_boros.als,
+                        CASE
+                            WHEN all_boros.minboro::text = all_boros.maxboro::text THEN all_boros.minboro::text
+                            ELSE (all_boros.minboro::text || ', '::text) || all_boros.maxboro::text
+                        END AS boro
+                   FROM ( SELECT d.node,
+                            min(d.street::text) AS s1,
+                            max(d.street::text) AS s2,
+                            array_agg(d.street) AS als,
+                            min(d.boro)::character varying AS minboro,
+                            max(d.boro)::character varying AS maxboro
+                           FROM ( SELECT l.nodeidfrom::integer AS node,
+                                    l.street,
+                                    NULLIF(l.lboro, 0::numeric) AS boro
+                                   FROM {s}.{l} l
+                                UNION
+                                 SELECT l.nodeidto::integer AS node,
+                                    l.street,
+                                    NULLIF(l.rboro, 0::numeric) AS boro
+                                   FROM FROM {s}.{l} l) d
+                          GROUP BY d.node) all_boros;
             """.format(s=schema, l=lion_table))
+    dbo.query("grant all on {s}.v_street_names to public;".format(s=schema))
 
 
 def ramp_intersection_views(dbo, schema, node_table, lion_table):
+    print 'Creating ramp intersection view'
     dbo.query("""
                     drop view if exists {s}.v_ramp_intersections;
                     create view {s}.v_ramp_intersections as
@@ -1389,6 +1792,7 @@ def ramp_intersection_views(dbo, schema, node_table, lion_table):
 
 
 def add_indexes(dbo,  node_table, lion_table, schema=params.WORKING_SCHEMA):
+    print 'Adding indexes'
     index_list = ["drop index if exists {s}.nd_IDX;".format(s=schema),
                   "drop index if exists {s}.master_IDX;".format(s=schema),
                   "drop index if exists {s}.seg_IDX;".format(s=schema),
@@ -1419,7 +1823,7 @@ def add_indexes(dbo,  node_table, lion_table, schema=params.WORKING_SCHEMA):
 @db2.timeDec
 def run():
     db = db2.PostgresDb(params.DB_HOST, params.DB_NAME, quiet=True)
-    #     1. Setup database
+    #     1. Setup databases
     if raw_input('Archive (Y/N) ?\n').upper() == 'Y':
         archive(db,
                 params.LION,
@@ -1429,50 +1833,107 @@ def run():
     fixes = [
         # KNOWN ERRORS IN LION TO FIX | INPUTS:
         # (field to select on, value to select on, field to update, value to update)
-        # ('segmentid', "'0172607'", 'trafdir', "'A'"),  # was P
-        # ('segmentid', "'0106838'", 'trafdir', "'A'"),  # was P
-        ('segmentid', "'0164415'", 'trafdir', "'A'"),  # was P
-        ('segmentid', "'0297670'", 'trafdir', "'A'"),  # was P
-        ('segmentid', "'0276350'", 'trafdir', "'A'"),  # was P
-        ('segmentid', "'0164344'", 'trafdir', "'A'"),  # was P
-        ('segmentid', "'0276509'", 'trafdir', "'A'"),  # was P
-        # ('segmentid', "'0176867'", 'street', "'59 AVENUE'"),  # was WOODHAVEN BOULEVARD
-        # ('segmentid', "'0176866'", 'street', "'59 AVENUE'"),  # was WOODHAVEN BOULEVARD
-        ('segmentid', "'0262058'", 'nonped', 'null'),  # was V
-        ('segmentid', "'0159297'", 'nonped', 'null'),  # was V
-        ('segmentid', "'0145754'", 'nonped', 'null'),  # was V
-        ('segmentid', "'0145755'", 'nonped', 'null'),  # was V
-        ('segmentid', "'0161277'", 'nonped', 'null'),  # was V
-        ('segmentid', "'0139548'", 'nonped', 'null'),  # was V
-        ('segmentid', "'0270493'", 'nonped', "'V'"),  # was NULL
-        # ('street', "'QUEENS MIDTOWN TUNNEL APPROACH'", 'rw_type', "'9'"),  # mis-catagorized as non-ramps
-        # ('street', "'QUEENS MIDTOWN TUNNEL EXIT'", 'rw_type', "'9'"),  # mis-catagorized as non-ramps
-        ('segmentid', "'0038411'", 'rw_type', "'9'"),  # need to treat it as a ramp
-        ('segmentid', "'0038398'", 'rw_type', "'9'"),  # need to treat it as a ramp
-        ('segmentid', "'0174839'", 'street', "'45 AVENUE'"),  # was 70 STREET
-        ('segmentid', "'0174841'", 'street', "'45 AVENUE'"),  # was 70 STREET
-        ('segmentid', "'0174840'", 'street', "'45 AVENUE'"),  # was 70 STREET
-        ('segmentid', "'0123347'", 'nodeidfrom', "'0076624'"),  # was 00000-1
-        ('segmentid', "'0123347'", 'nodeidto', "'0076623'"),  # was 00000-1
+        ('segmentid', "'0164415'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0297670'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0276350'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0164344'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0276509'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0164272'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0164273'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0164278'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0164279'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0164362'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
+        ('segmentid', "'0164361'", 'trafdir', "'A'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was P
 
-        ('segmentid', "'0176861'", 'nodelevelt', "'M'"),  # was *
-        ('segmentid', "'0176861'", 'nodelevelf', "'M'"),  # was *
-        ('segmentid', "'0176861'", 'rb_layer', "'B'"),  # was G
-        ('segmentid', "'0176861'", 'rw_type', "'9'"),  # need to treat it as a ramp
-        ('segmentid', "'0122207'", 'nodelevelt', "'M'"),  # was *
-        ('segmentid', "'0122207'", 'nodelevelf', "'M'"),  # was *
-        ('segmentid', "'0122207'", 'rb_layer', "'B'"),  # was G
-        ('segmentid', "'0122207'", 'rw_type', "'9'"),  # need to treat it as a ramp
-        ('segmentid', "'0175063'", 'nodelevelt', "'M'"),  # was *
-        ('segmentid', "'0175063'", 'nodelevelf', "'M'"),  # was *
-        ('segmentid', "'0175063'", 'rb_layer', "'B'"),  # was G
-        ('segmentid', "'0175063'", 'rw_type', "'9'")  # need to treat it as a ramp
+        ('segmentid', "'0262058'", 'nonped', 'null', "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was V
+        ('segmentid', "'0159297'", 'nonped', 'null', "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was V
+        ('segmentid', "'0145754'", 'nonped', 'null', "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was V
+        ('segmentid', "'0145755'", 'nonped', 'null', "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was V
+        ('segmentid', "'0320220'", 'nonped', 'null', "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was V
+        ('segmentid', "'0320221'", 'nonped', 'null', "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was V
+        ('segmentid', "'0139548'", 'nonped', 'null', "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was V
+        ('segmentid', "'0270493'", 'nonped', "'V'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was NULL
+
+         # need to treat as ramps
+        ('segmentid', "'0038411'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0038398'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0176861'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0175063'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0122207'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0174787'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+
+         # incorrectly coded as Non-Physical Street Segment
+        ('segmentid', "'0174786'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0136065'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0180628'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0180621'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0180563'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0180625'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0180612'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0180657'", 'rw_type', "'9'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+
+        # rename streets
+         # was 70 STREET
+        ('segmentid', "'0174839'", 'street', "'45 AVENUE'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0174841'", 'street', "'45 AVENUE'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0174840'", 'street', "'45 AVENUE'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+
+        # fix missing nodes (from/to)
+         # was 00000-1
+        ('segmentid', "'0320176'", 'nodeidfrom', "'9013735'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'8500414'", 'nodeidto', "'9012927'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'8500521'", 'nodeidfrom', "'9012929'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0320175'", 'nodeidto', "'9013736'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'9016530'", 'nodeidfrom', "'9012931'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0320122'", 'nodeidto', "'9011373'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+
+        # fix node levels
+        ('segmentid', "'0176861'", 'nodelevelt', "'M'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was *
+        ('segmentid', "'0176861'", 'nodelevelf', "'M'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was *
+        ('segmentid', "'0176861'", 'rb_layer', "'B'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was G
+
+        ('segmentid', "'0122207'", 'nodelevelt', "'M'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was *
+        ('segmentid', "'0122207'", 'nodelevelf', "'M'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was *
+        ('segmentid', "'0122207'", 'rb_layer', "'B'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was G
+
+        ('segmentid', "'0175063'", 'nodelevelt', "'M'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was *
+        ('segmentid', "'0175063'", 'nodelevelf', "'M'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was *
+        ('segmentid', "'0175063'", 'rb_layer', "'B'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),  # was G
+
+         # need to treat it as a street (not highway)
+        ('segmentid', "'0188328'", 'nonped', "'D'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0051303'", 'nonped', "'D'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0051299'", 'nonped', "'D'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0051411'", 'nonped', "'D'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0188327'", 'nonped', "'D'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0262057'", 'nonped', "'D'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+
+        # need to treat as faux segment
+        ('segmentid', "'0136096'", 'segmenttyp', "'F'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+
+        # should be coded as driveway
+        ('segmentid', "'0162857'", 'street', "'DRIVEWAY'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0162858'", 'street', "'DRIVEWAY'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        ('segmentid', "'0162859'", 'street', "'DRIVEWAY'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+        # not really a driveway but should be treated as such
+        ('segmentid', "'0291553'", 'street', "'DRIVEWAY'", "{}.{}".format(params.WORKING_SCHEMA, params.LION)),
+
+
+        # Fix rpl file errors
+        ('segmentidr', "134507", 'segmentidg', "313540", "{}.{}".format(params.WORKING_SCHEMA, params.RPL)),
+        ('segmentidr', "134506", 'segmentidg', "313540", "{}.{}".format(params.WORKING_SCHEMA, params.RPL)),
+
+        ('rpl_id', "8821", 'segmentidg', "NULL", "{}.{}".format(params.WORKING_SCHEMA, params.RPL)),
+        ('rpl_id', "8821", 'g_frnd', "NULL", "{}.{}".format(params.WORKING_SCHEMA, params.RPL))
     ]
 
     print '\n'*25
+    suf.run()
     setup_database(db)  # 221 sec
+    # temporary unitl gdb to db is fixed passing through shp casues problems
+    suf.temp_name_fix(db, params.WORKING_SCHEMA, params.LION)
     #     2. Define street network to use (centerline)
-    manual_fix_segments(db, fixes, params.WORKING_SCHEMA, params.LION)
+    manual_fixes(db, fixes)
     define_usable_street_network(db, params.WORKING_SCHEMA, params.LION)
     define_ramps(db, params.WORKING_SCHEMA, params.LION)
     #     3. Define Intersections
@@ -1503,6 +1964,12 @@ def run():
         params.FOLDER,
         params.LION,
         params.WORKING_SCHEMA)
+
+    update_blocks_limit_to_1_street_name(db,
+                                         params.LION,
+                                         params.WORKING_SCHEMA)
+
+
     params.clusterIntersections = intersection_cluster_dict(
         params.nodeStreetNames,
         params.clusterIntersections,
@@ -1577,6 +2044,7 @@ def run():
     dissolve_corridors(db)
     corridor_id(db)
     add_corridor_to_lion(db)
+
     db.dbClose()
     del db
 
@@ -1617,9 +2085,11 @@ def index_and_permissions():
         params.NODE,
         'master_seg_geo_lookup',
         'master_node_geo_lookup',
-        'node_stnameft'
+        'node_stnameft',
+        'altnames'
     ]
-    for table in tables:
+    add_version(db, params.WORKING_SCHEMA, params.VERSION, tables[2:])
+    for table in tqdm(tables):
         db.query("grant all on {s}.{t} to public;".format(
             s=params.WORKING_SCHEMA,
             t=table

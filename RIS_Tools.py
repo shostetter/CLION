@@ -231,11 +231,28 @@ def read(in_file='', tries=0):
             tries += 1
             return read(get_file_loc(), tries)
 
+def import_dbf_to_pg(import_dbf, pgo, schema='public', gdal_data=r"C:\Program Files (x86)\GDAL\gdal-data"):
+    cmd = 'ogr2ogr --config GDAL_DATA "{gdal_data}" -f "PostgreSQL" PG:"host={host} user={user} dbname={dbname} \
+    password={password}" {import_dbf} -nln "{tbl_name}" -progress'.format(
+        gdal_data=gdal_data,
+        host=pgo.params['host'],
+        dbname=pgo.params['dbname'],
+        user=pgo.params['user'],
+        password=pgo.params['password'],
+        import_dbf=import_dbf,
+        schema=schema,
+        tbl_name=os.path.basename(import_dbf)[:-4]
+    )
+    subprocess.call(cmd, shell=True)
 
-def import_shp_to_pg(import_shp, pgo, schema='public', gdal_data=r"C:\Program Files (x86)\GDAL\gdal-data"):
+
+def import_shp_to_pg(import_shp, pgo, schema='public', perc=False, gdal_data=r"C:\Program Files (x86)\GDAL\gdal-data"):
+    per = ''
+    if perc:
+        per = '-lco precision=NO'
     cmd = 'ogr2ogr --config GDAL_DATA "{gdal_data}" -nlt PROMOTE_TO_MULTI -overwrite -a_srs ' \
           'EPSG:{srid} -progress -f "PostgreSQL" PG:"host={host} port=5432 dbname={dbname} ' \
-          'user={user} password={password}" "{shp}" -nln {schema}.{tbl_name}'.format(
+          'user={user} password={password}" "{shp}" -nln {schema}.{tbl_name} {perc}'.format(
         gdal_data=gdal_data,
         srid='2263',
         host=pgo.params['host'],
@@ -244,7 +261,8 @@ def import_shp_to_pg(import_shp, pgo, schema='public', gdal_data=r"C:\Program Fi
         password=pgo.params['password'],
         shp=import_shp,
         schema=schema,
-        tbl_name=import_shp[:-4]
+        tbl_name=import_shp[:-4],
+        perc=per
     )
     subprocess.call(cmd, shell=True)
 
@@ -260,3 +278,32 @@ def add_data_to_pg(pg, dest_table_name, dest_schema=None, seperator='|', tbl='te
         cur.copy_from(f, loc_table, sep=seperator, null='')
     pg.conn.commit()
     os.remove(os.path.join(os.getcwd(), tbl))  # clean up after yourself in the folder
+
+
+def import_from_gdb(gdb, feature_name, pgo, schema, gdal_data=r"C:\Program Files (x86)\GDAL\gdal-data"):
+    print 'Deleting existing table {s}.{t}'.format(s=schema, t=feature_name)
+    pgo.query("DROP TABLE IF EXISTS {s}.{t} CASCADE".format(s=schema, t=feature_name))
+
+    cmd = 'ogr2ogr --config GDAL_DATA "{gdal_data}" -nlt PROMOTE_TO_MULTI -overwrite -a_srs ' \
+              'EPSG:{srid} -f "PostgreSQL" PG:"host={host} user={user} dbname={dbname} ' \
+              'password={password}" "{gdb}" "{feature}" -nln {sch}.{feature} -progress'.format(
+        gdal_data=gdal_data,
+        srid=2263,
+        host=pgo.params['host'],
+        dbname=pgo.params['dbname'],
+        user=pgo.params['user'],
+        password=pgo.params['password'],
+        gdb=gdb,
+        feature=feature_name,
+        sch=schema)
+    os.system(cmd)
+    pgo.query("""
+            ALTER TABLE {s}.{t}
+            RENAME wkb_geometry to geom
+        """.format(s=schema, t=feature_name))
+    # rename index
+    pgo.query("""
+            ALTER INDEX IF EXISTS
+            {s}.{t}_wkb_geometry_geom_idx
+            RENAME to {t}_geom_idx
+        """.format(s=schema, t=feature_name))

@@ -75,10 +75,15 @@ def add_row(db, row):
         #print 'Added %s' % row[0]
 
 
+def add_manual_fix_flig(db, rpl):
+    db.query("ALTER TABLE {s}.{r} ADD manual_fix bool default False".format(s=params.WORKING_SCHEMA, r=rpl))
+
+
 def run(db, folder, rpl):
     r_data = read_file(os.path.join(folder, rpl))
     dta = split_to_rows(r_data)
     split_data = split_to_columns(dta)
     add_to_db(db, split_data, rpl)
+    add_manual_fix_flig(db, params.RPL)
 
 

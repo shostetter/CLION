@@ -2,22 +2,24 @@ from collections import defaultdict
 
 __author__ = 'SHostetter'
 # set up base globals
-DB_HOST =  # database host
-DB_NAME = # Database
-WORKING_SCHEMA = 'working'  # 'working'
+DOWLOAD_PATH = r'C:\Users\SHostetter\Desktop'
+DB_HOST = 'DOTDEVRHPGSQL01'  # database host
+DB_NAME = 'CRASHDATA'   # Database
+WORKING_SCHEMA = 'public'  # 'working'
 FINAL_SCHEMA = 'public'
 ARCHIVE_SCHEMA = 'archive'
 LION = 'lion'
 NODE = 'node'
 RPL = 'tbl_rpl'
 RPL_TXT = 'RPL.txt'
-VERSION = '18d'  # '15b'
-PRECINCTS = 'districts_police_precincts'
+VERSION = '19d'
+PRECINCTS = 'nypp'#''districts_police_precincts'
 BOROUGHS = 'districts_boroughs'
 HIGHWAYS = True
 SRID = 2263
 
-FOLDER = # working folder
+FOLDER = r'C:\Users\SHostetter\Desktop\GIT\CLION\DATA\{}'.format(VERSION.upper())
+
 
 # global dictionaries
 def st_name_factory():
