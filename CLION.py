@@ -507,7 +507,8 @@ def build_street_name_table(dbo, schema=params.WORKING_SCHEMA, lion=params.LION,
         on street.node = ramp.node and street.street != ramp.street and street.level = ramp.level
         /*left outer*/ join {s}.node_levels as levels 
         on street.node = levels.nodeid
-        where levels.levels = 1 --or levels.levels is null
+        where levels.levels = 1 
+        --or levels.levels is null
     ) as i
     where n.nodeid = i.node;
     """.format(s=schema, n=node))
@@ -924,29 +925,6 @@ def get_nodes_pct(dbo, schema):
 # =====================================================================================================================
 
 def get_all_database_needs_for_distance_check(dbo, schema, node_table, precinct_table):
-    # get the precinct for each node
-    # data = dbo.query("""
-    #                 select nodeid::int as nodeid, precinct
-    #                         from {0}.{1} as n
-    #                         join {0}.{2} as l on l.nodeidfrom::int=nodeid::int
-    #                         join {0}.{2} as ll on ll.nodeidfrom::int=nodeid::int
-    #                         join {3} as p on st_within(n.geom, p.geom)
-    #                         where l.street !=ll.street
-    #                     union
-    #                         select nodeid::int as nodeid, precinct
-    #                         from {0}.{1} as n
-    #                         join {0}.{2} as l on l.nodeidto::int=nodeid::int
-    #                         join {0}.{2} as ll on ll.nodeidto::int=nodeid::int
-    #                         join {3} as p on st_within(n.geom, p.geom)
-    #                         where l.street !=ll.street
-    #                     union
-    #                         select nodeid::int as nodeid, precinct
-    #                         from {0}.{1} as n
-    #                         join {0}.{2} as l on l.nodeidfrom::int=nodeid::int
-    #                         join {0}.{2} as ll on ll.nodeidto::int=nodeid::int
-    #                         join {3} as p on st_within(n.geom, p.geom)
-    #                         where l.street !=ll.street
-    #                 """.format(schema, node_table, lion_table, precinct_table))
     data = dbo.query("""select nodeid::int as nodeid, precinct
                             from {0}.{1} as n join {2} as p 
                             on st_dwithin(n.geom, p.geom, 10)
