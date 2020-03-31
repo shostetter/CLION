@@ -189,8 +189,8 @@ def add_version(dbo, schema=params.WORKING_SCHEMA, version=params.VERSION,
     # tables = [lion, node, 'tbl_'+rpl[:-4]]
     for table in tables:
         print 'Updating {}...'.format(table)
-        dbo.query("ALTER TABLE {s}.{t} ADD version varchar(5)".format(s=schema, t=table))
-        dbo.query("ALTER TABLE {s}.{t} ADD created TIMESTAMP; SET timezone = 'America/New_York';".format(
+        dbo.query("ALTER TABLE {s}.{t} ADD if not exists version varchar(5)".format(s=schema, t=table))
+        dbo.query("ALTER TABLE {s}.{t} ADD if not exists created TIMESTAMP; SET timezone = 'America/New_York';".format(
             s=schema, t=table))
         dbo.query("UPDATE {s}.{t} set version = '{v}', created = now()".format(s=schema, t=table, v=version))
 
@@ -1368,7 +1368,7 @@ def update_roadbeds(dbo, schema, lion_table, tbl_rpl):
                 set mft = r.mft, masteridfrom = r.masteridfrom, masteridto=r.masteridto
                 from rb_mft as r
                 where l.segmentid::int = r.segmentidr
-                and r.mft is not null and l.exclude = False
+                and r.mft is not null 
             """.format(s=schema, l=lion_table))
 
 
@@ -1733,7 +1733,7 @@ def street_name_view(dbo, schema, lion_table):
     print 'Creating street name view'
     dbo.query("""
                 drop view if exists {s}.v_street_names;
-                CREATE VIEW public.v_street_names
+                CREATE VIEW {s}.v_street_names
                  AS
                  SELECT all_boros.node,
                     all_boros.s1,
@@ -1757,7 +1757,7 @@ def street_name_view(dbo, schema, lion_table):
                                  SELECT l.nodeidto::integer AS node,
                                     l.street,
                                     NULLIF(l.rboro, 0::numeric) AS boro
-                                   FROM FROM {s}.{l} l) d
+                                   FROM {s}.{l} l) d
                           GROUP BY d.node) all_boros;
             """.format(s=schema, l=lion_table))
     dbo.query("grant all on {s}.v_street_names to public;".format(s=schema))

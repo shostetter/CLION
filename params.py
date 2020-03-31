@@ -2,23 +2,23 @@ from collections import defaultdict
 
 __author__ = 'SHostetter'
 # set up base globals
-DOWLOAD_PATH = r'C:\Users\SHostetter\Desktop'
-DB_HOST = 'DOTDEVRHPGSQL01'  # database host
-DB_NAME = 'CRASHDATA'   # Database
-WORKING_SCHEMA = 'public'  # 'working'
-FINAL_SCHEMA = 'public'
-ARCHIVE_SCHEMA = 'archive'
+DOWLOAD_PATH = # path to where downloads land
+DB_HOST = # database host
+DB_NAME =   # Database
+WORKING_SCHEMA =  # 'working'
+FINAL_SCHEMA = 
+ARCHIVE_SCHEMA = 
 LION = 'lion'
 NODE = 'node'
 RPL = 'tbl_rpl'
 RPL_TXT = 'RPL.txt'
 VERSION = '19d'
-PRECINCTS = 'nypp'#''districts_police_precincts'
+PRECINCTS = 'districts_police_precincts'
 BOROUGHS = 'districts_boroughs'
 HIGHWAYS = True
 SRID = 2263
 
-FOLDER = r'C:\Users\SHostetter\Desktop\GIT\CLION\DATA\{}'.format(VERSION.upper())
+FOLDER = # working folder 
 
 
 # global dictionaries
