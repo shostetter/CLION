@@ -507,8 +507,7 @@ def build_street_name_table(dbo, schema=params.WORKING_SCHEMA, lion=params.LION,
         on street.node = ramp.node and street.street != ramp.street and street.level = ramp.level
         /*left outer*/ join {s}.node_levels as levels 
         on street.node = levels.nodeid
-        where levels.levels = 1 
-        --or levels.levels is null
+        where levels.levels = 1 --or levels.levels is null
     ) as i
     where n.nodeid = i.node;
     """.format(s=schema, n=node))
@@ -925,6 +924,29 @@ def get_nodes_pct(dbo, schema):
 # =====================================================================================================================
 
 def get_all_database_needs_for_distance_check(dbo, schema, node_table, precinct_table):
+    # get the precinct for each node
+    # data = dbo.query("""
+    #                 select nodeid::int as nodeid, precinct
+    #                         from {0}.{1} as n
+    #                         join {0}.{2} as l on l.nodeidfrom::int=nodeid::int
+    #                         join {0}.{2} as ll on ll.nodeidfrom::int=nodeid::int
+    #                         join {3} as p on st_within(n.geom, p.geom)
+    #                         where l.street !=ll.street
+    #                     union
+    #                         select nodeid::int as nodeid, precinct
+    #                         from {0}.{1} as n
+    #                         join {0}.{2} as l on l.nodeidto::int=nodeid::int
+    #                         join {0}.{2} as ll on ll.nodeidto::int=nodeid::int
+    #                         join {3} as p on st_within(n.geom, p.geom)
+    #                         where l.street !=ll.street
+    #                     union
+    #                         select nodeid::int as nodeid, precinct
+    #                         from {0}.{1} as n
+    #                         join {0}.{2} as l on l.nodeidfrom::int=nodeid::int
+    #                         join {0}.{2} as ll on ll.nodeidto::int=nodeid::int
+    #                         join {3} as p on st_within(n.geom, p.geom)
+    #                         where l.street !=ll.street
+    #                 """.format(schema, node_table, lion_table, precinct_table))
     data = dbo.query("""select nodeid::int as nodeid, precinct
                             from {0}.{1} as n join {2} as p 
                             on st_dwithin(n.geom, p.geom, 10)
@@ -1244,44 +1266,54 @@ def fix_dead_ends(dbo, lion_table, node_table, schema):
 ############################################################################################
 #################### CHANGED MAR 2020 FROM MASTER FROM/TO TO MFT ###########################
 ############################################################################################
-# @db2.timeDec
-# def stabilize_mfts(dbo, lion_table, schema):
-#     dbo.query("alter table {s}.{n} add newid int;".format(s=schema, n=lion_table))
-#     dbo.query("""drop table if exists {s}.new_mft;
-#                 create table {s}.new_mft as
-#                 select masteridfrom, masteridto, max(segmentid ) as newid
-#                 from {s}.{n}
-#                 where (masteridfrom is not null or masteridto is not null)
-#                 and exclude = False
-#                 group by masteridfrom, masteridto
-#                 """.format(s=schema, n=lion_table))
-#     dbo.query("""
-#                 update {s}.{n} as n
-#                 set newid = nm.newid::int
-#                 from {s}.new_mft as nm
-#                 where COALESCE(n.masteridfrom, 0) = COALESCE(nm.masteridfrom,0) and
-#                 COALESCE(n.masteridto,0) = COALESCE(nm.masteridto,0);""".format(s=schema, n=lion_table))
-#     dbo.query("update {s}.{n} set mft = newid;".format(s=schema, n=lion_table))
-#     dbo.query("alter table {s}.{n} drop column newid;".format(s=schema, n=lion_table))
-#     dbo.query("drop table if exists {s}.new_mft;".format(s=schema))
 @db2.timeDec
 def stabilize_mfts(dbo, lion_table, schema):
     dbo.query("alter table {s}.{n} add newid int;".format(s=schema, n=lion_table))
     dbo.query("""drop table if exists {s}.new_mft;
                 create table {s}.new_mft as
-                select mft, max(segmentid ) as newid
+                select masteridfrom, masteridto, max(segmentid ) as newid
                 from {s}.{n}
-                where exclude = False
-                group by mft
+                where (masteridfrom is not null or masteridto is not null)
+                and exclude = False
+                group by masteridfrom, masteridto
                 """.format(s=schema, n=lion_table))
     dbo.query("""
                 update {s}.{n} as n
                 set newid = nm.newid::int
                 from {s}.new_mft as nm
-                where n.mft=nm.mft;""".format(s=schema, n=lion_table))
+                where 
+                    (
+                    COALESCE(n.masteridfrom, 0) = COALESCE(nm.masteridfrom,0) and
+                    COALESCE(n.masteridto,0) = COALESCE(nm.masteridto,0)
+                    )
+                    or 
+                    (
+                    COALESCE(n.masteridto, 0) = COALESCE(nm.masteridfrom,0) and
+                    COALESCE(n.masteridfrom,0) = COALESCE(nm.masteridto,0)
+                    )
+                ;
+            """.format(s=schema, n=lion_table))
     dbo.query("update {s}.{n} set mft = newid;".format(s=schema, n=lion_table))
     dbo.query("alter table {s}.{n} drop column newid;".format(s=schema, n=lion_table))
     dbo.query("drop table if exists {s}.new_mft;".format(s=schema))
+# @db2.timeDec
+# def stabilize_mfts(dbo, lion_table, schema):
+#     dbo.query("alter table {s}.{n} add newid int;".format(s=schema, n=lion_table))
+#     dbo.query("""drop table if exists {s}.new_mft;
+#                 create table {s}.new_mft as
+#                 select mft, max(segmentid ) as newid
+#                 from {s}.{n}
+#                 where exclude = False
+#                 group by mft
+#                 """.format(s=schema, n=lion_table))
+#     dbo.query("""
+#                 update {s}.{n} as n
+#                 set newid = nm.newid::int
+#                 from {s}.new_mft as nm
+#                 where n.mft=nm.mft;""".format(s=schema, n=lion_table))
+#     dbo.query("update {s}.{n} set mft = newid;".format(s=schema, n=lion_table))
+#     dbo.query("alter table {s}.{n} drop column newid;".format(s=schema, n=lion_table))
+#     dbo.query("drop table if exists {s}.new_mft;".format(s=schema))
 
 
 def remap_blocks(dbo, lion_table, node_table, schema):
@@ -1739,6 +1771,18 @@ def street_name_view(dbo, schema, lion_table):
                           GROUP BY d.node) all_boros;
             """.format(s=schema, l=lion_table))
     dbo.query("grant all on {s}.v_street_names to public;".format(s=schema))
+
+    dbo.query("""
+        drop view if exists {s}.v_street_name_aliases;
+        create view {s}.v_street_name_aliases as 
+        
+        SELECT DISTINCT s1.street,
+            s2.street AS street_alias
+           FROM {s}.altnames s1
+             JOIN {s}.altnames s2 ON s1.join_id = s2.join_id
+          WHERE s1.street IS NOT NULL AND s2.street IS NOT NULL
+          and right(s1.join_id, 1) in ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
+    """)
 
 
 def ramp_intersection_views(dbo, schema, node_table, lion_table):
